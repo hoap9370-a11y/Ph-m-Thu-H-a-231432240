@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Giám sát vườn cây công nghiệp</title>
+
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Arial, sans-serif; background: #edf2ed; color: #24352a; }
+header { background: #205b39; color: white; padding: 22px; }
+header h1 { margin: 0 0 8px; font-size: 25px; }
+header p { margin: 0; color: #d8e9dc; }
+.container { max-width: 1450px; margin: auto; padding: 22px; }
+.top-data { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 20px; }
+.data-card { background: white; padding: 20px; border-radius: 12px; }
+.data-card h3 { color: #66766b; font-size: 14px; margin: 0 0 10px; }
+.value { font-size: 32px; font-weight: bold; color: #205b39; }
+.main-layout { display: grid; grid-template-columns: 65% 35%; gap: 18px; align-items: stretch; }
+.chart-card, .control-card { background: white; border-radius: 12px; padding: 22px; }
+.chart-card h2, .control-card h2 { margin-top: 0; font-size: 19px; display: flex; justify-content: space-between; align-items: center; }
+.chart-area { height: 470px; position: relative; }
+.control-card { display: flex; flex-direction: column; gap: 15px; }
+
+/* Nút chuyển chế độ Tổng (AUTO / MANUAL) ở tiêu đề Bảng điều khiển */
+.system-mode-toggle { display: flex; background: #e0e8e2; border-radius: 6px; padding: 2px; }
+.mode-btn { background: transparent; border: none; padding: 6px 14px; font-size: 13px; font-weight: bold; cursor: pointer; border-radius: 4px; color: #555; }
+.mode-btn.active { background: #205b39; color: white; }
+
+.device { padding: 12px 0; border-bottom: 1px solid #e5eae5; }
+.device-name { font-weight: bold; margin-bottom: 8px; }
+.device-row { display: flex; align-items: center; justify-content: space-between; }
+.state { font-size: 13px; font-weight: bold; color: #777; }
+.state.on { color: #168044; }
+
+/* Công tắc gạt */
+.switch { position: relative; width: 54px; height: 29px; display: inline-block; flex-shrink: 0; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider { position: absolute; inset: 0; cursor: pointer; background: #b8c0ba; border-radius: 30px; transition: .25s; }
+.slider:before { content: ""; position: absolute; height: 21px; width: 21px; left: 4px; top: 4px; background: white; border-radius: 50%; transition: .25s; }
+.switch input:checked + .slider { background: #269653; }
+.switch input:checked + .slider:before { transform: translateX(25px); }
+.switch input:disabled + .slider { background: #d0d5d2; cursor: not-allowed; opacity: 0.6; }
+
+.level-title { font-weight: bold; margin: 5px 0; }
+.level-buttons { display: flex; gap: 8px; }
+.level-buttons button { flex: 1; padding: 12px 5px; border: 1px solid #cbd5cc; border-radius: 7px; background: white; cursor: pointer; font-weight: bold; }
+.level-buttons button.active { background: #205b39; color: white; border-color: #205b39; }
+.level-buttons button:disabled { background: #f0f4f1; color: #aaa; border-color: #e0e5e2; cursor: not-allowed; }
+
+.mqtt-status { display: inline-block; background: #d9f5e2; color: #168044; padding: 7px 12px; border-radius: 20px; font-size: 13px; font-weight: bold; }
+.mqtt-status.offline { background: #eeeeee; color: #777; }
+footer { text-align: center; padding: 22px; color: #66766b; }
+@media(max-width: 850px) { .main-layout { grid-template-columns: 1fr; } .chart-area { height: 350px; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>GIÁM SÁT VƯỜN CÂY CÔNG NGHIỆP</h1>
+  <p>Hệ thống giám sát và điều khiển môi trường sử dụng ESP32 và MQTT</p>
+  <br>
+  <span id="mqttStatus" class="mqtt-status offline">ĐANG KẾT NỐI MQTT...</span>
+</header>
+
+<div class="container">
+  <div class="top-data">
+    <div class="data-card">
+      <h3>NHIỆT ĐỘ</h3>
+      <div class="value"><span id="temperature">--</span> °C</div>
+    </div>
+    <div class="data-card">
+      <h3>ĐỘ ẨM KHÔNG KHÍ</h3>
+      <div class="value"><span id="humidity">--</span> %</div>
+    </div>
+  </div>
+
+  <div class="main-layout">
+    <div class="chart-card">
+      <h2>BIỂU ĐỒ NHIỆT ĐỘ VÀ ĐỘ ẨM</h2>
+      <div class="chart-area"><canvas id="environmentChart"></canvas></div>
+    </div>
+
+    <div class="control-card">
+      <h2>
+        <span>BẢNG ĐIỀU KHIỂN</span>
+        <div class="system-mode-toggle">
+          <button id="autoModeBtn" class="mode-btn active" onclick="setSystemMode('AUTO')">AUTO</button>
+          <button id="manModeBtn" class="mode-btn" onclick="setSystemMode('MANUAL')">MANUAL</button>
+        </div>
+      </h2>
+
+      <!-- QUẠT -->
+      <div class="device">
+        <div class="device-name">QUẠT</div>
+        <div class="device-row">
+          <span id="fanState" class="state">OFF</span>
+          <label class="switch">
+            <input type="checkbox" id="fanSwitch" disabled onchange="toggleDevice('fan', this.checked)">
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <!-- MÁY BƠM -->
+      <div class="device">
+        <div class="device-name">MÁY BƠM</div>
+        <div class="device-row">
+          <span id="pumpState" class="state">OFF</span>
+          <label class="switch">
+            <input type="checkbox" id="pumpSwitch" disabled onchange="toggleDevice('pump', this.checked)">
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <!-- PHUN SƯƠNG -->
+      <div class="device">
+        <div class="device-name">PHUN SƯƠNG</div>
+        <div class="device-row">
+          <span id="mistState" class="state">OFF</span>
+          <label class="switch">
+            <input type="checkbox" id="mistSwitch" disabled onchange="toggleDevice('mist', this.checked)">
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div>
+        <div class="level-title">MỨC PHUN SƯƠNG</div>
+        <div class="level-buttons">
+          <button id="lvl25" class="active" disabled onclick="changeLevel(25)">25%</button>
+          <button id="lvl50" disabled onclick="changeLevel(50)">50%</button>
+          <button id="lvl100" disabled onclick="changeLevel(100)">100%</button>
+        </div>
+        <p>Mức hiện tại: <b id="mistLevel">0%</b></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<footer>HỆ THỐNG GIÁM SÁT MÔI TRƯỜNG VƯỜN CÂY CÔNG NGHIỆP</footer>
+
+<script>
+const TOPIC_DATA   = "farm/telemetry/data";
+const TOPIC_PUMP   = "farm/control/pump";
+const TOPIC_FAN    = "farm/control/fan";
+const TOPIC_MIST   = "farm/control/mist";
+
+const STATUS_PUMP  = "farm/status/pump";
+const STATUS_FAN   = "farm/status/fan";
+const STATUS_MIST  = "farm/status/mist";
+
+const TOPIC_SYS_MODE = "farm/system/mode";
+
+const client = mqtt.connect("wss://broker.hivemq.com:8884/mqtt", {
+  clientId: "garden_web_" + Math.random().toString(16).slice(2),
+  clean: true,
+  connectTimeout: 10000,
+  reconnectPeriod: 3000
+});
+
+const ctx = document.getElementById("environmentChart");
+const chart = new Chart(ctx, {
+  type: "line",
+  data: {
+    labels: [],
+    datasets: [
+      { label: "Nhiệt độ (°C)", data: [], borderColor: "#df812e", backgroundColor: "#df812e22", borderWidth: 3, tension: 0.3, fill: false },
+      { label: "Độ ẩm (%)", data: [], borderColor: "#3188b4", backgroundColor: "#3188b422", borderWidth: 3, tension: 0.3, fill: false }
+    ]
+  },
+  options: { responsive: true, maintainAspectRatio: false, interaction: { intersect: false, mode: "index" }, plugins: { legend: { position: "bottom" } } }
+});
+
+client.on("connect", () => {
+  const status = document.getElementById("mqttStatus");
+  status.textContent = "MQTT ĐÃ KẾT NỐI";
+  status.classList.remove("offline");
+  client.subscribe(TOPIC_DATA);
+  client.subscribe(STATUS_PUMP);
+  client.subscribe(STATUS_FAN);
+  client.subscribe(STATUS_MIST);
+});
+
+client.on("offline", () => {
+  const status = document.getElementById("mqttStatus");
+  status.textContent = "MẤT KẾT NỐI MQTT";
+  status.classList.add("offline");
+});
+
+client.on("message", (topic, message) => {
+  const payloadStr = message.toString();
+
+  if (topic === TOPIC_DATA) {
+    try {
+      const data = JSON.parse(payloadStr);
+      const temp = Number(data.temp);
+      const hum = Number(data.humi);
+
+      if (Number.isFinite(temp)) document.getElementById("temperature").textContent = temp.toFixed(1);
+      if (Number.isFinite(hum)) document.getElementById("humidity").textContent = hum.toFixed(1);
+
+      if (Number.isFinite(temp) && Number.isFinite(hum)) {
+        const time = new Date().toLocaleTimeString();
+        chart.data.labels.push(time);
+        chart.data.datasets[0].data.push(temp);
+        chart.data.datasets[1].data.push(hum);
+        if (chart.data.labels.length > 30) {
+          chart.data.labels.shift();
+          chart.data.datasets.forEach(ds => ds.data.shift());
+        }
+        chart.update();
+      }
+    } catch (e) {}
+  }
+
+  if (topic === STATUS_PUMP) setDeviceState("pump", payloadStr === "ON");
+  if (topic === STATUS_FAN) setDeviceState("fan", payloadStr === "ON");
+  if (topic === STATUS_MIST) {
+    const val = Number(payloadStr);
+    setDeviceState("mist", val > 0);
+    document.getElementById("mistLevel").textContent = val + "%";
+    if (val > 0) {
+      document.querySelectorAll(".level-buttons button").forEach(btn => {
+        btn.classList.toggle("active", Number(btn.dataset.level) === val);
+      });
+    }
+  }
+});
+
+function setDeviceState(device, isOn) {
+  const switchElement = document.getElementById(device + "Switch");
+  const stateElement = document.getElementById(device + "State");
+  if (switchElement) switchElement.checked = isOn;
+  if (stateElement) {
+    stateElement.textContent = isOn ? "ON" : "OFF";
+    stateElement.classList.toggle("on", isOn);
+  }
+}
+
+// Chuyển chế độ Tổng (AUTO / MANUAL)
+function setSystemMode(mode) {
+  if (!client.connected) { alert("MQTT chưa kết nối!"); return; }
+
+  const isManual = (mode === "MANUAL");
+
+  // Đổi màu nút chọn chế độ ở tiêu đề
+  document.getElementById("autoModeBtn").classList.toggle("active", !isManual);
+  document.getElementById("manModeBtn").classList.toggle("active", isManual);
+
+  // Khóa / Mở khóa toàn bộ công tắc và nút bấm thiết bị
+  document.getElementById("pumpSwitch").disabled = !isManual;
+  document.getElementById("fanSwitch").disabled = !isManual;
+  document.getElementById("mistSwitch").disabled = !isManual;
+
+  document.querySelectorAll(".level-buttons button").forEach(btn => {
+    btn.disabled = !isManual;
+  });
+
+  // Gửi lệnh chế độ qua MQTT
+  client.publish(TOPIC_SYS_MODE, mode);
+}
+
+// Điều khiển thiết bị (Phản hồi siêu tốc Optimistic UI)
+function toggleDevice(device, checked) {
+  if (!client.connected) { 
+    alert("MQTT chưa kết nối!"); 
+    document.getElementById(device + "Switch").checked = !checked;
+    return; 
+  }
+
+  setDeviceState(device, checked);
+
+  const state = checked ? "ON" : "OFF";
+  if (device === "pump") client.publish(TOPIC_PUMP, state);
+  else if (device === "fan") client.publish(TOPIC_FAN, state);
+  else if (device === "mist") client.publish(TOPIC_MIST, checked ? "25" : "0");
+}
+
+function changeLevel(level) {
+  if (!client.connected) { alert("MQTT chưa kết nối!"); return; }
+
+  document.querySelectorAll(".level-buttons button").forEach(btn => {
+    btn.classList.toggle("active", Number(btn.dataset.level) === level);
+  });
+  document.getElementById("mistLevel").textContent = level + "%";
+  setDeviceState("mist", true);
+
+  client.publish(TOPIC_MIST, String(level));
+}
+</script>
+
+</body>
+</html>
